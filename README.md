@@ -30,14 +30,14 @@ ADK **`Workflow`** 기반의 [agent.py](file:///home/user/workspace/ambient_agen
 에이전트 런타임 및 Pub/Sub Push 인증에 사용할 Service Account를 생성하고 필요한 역할을 부여합니다.
 
 ```bash
+# 1) GCP Project ID 및 Project Number 설정
 export GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project)}"
-```
-```bash
-export SA_NAME="ambient-agent-sa"
-export SA_EMAIL="${SA_NAME}@${GOOGLE_CLOUD_PROJECT}.iam.gserviceaccount.com"
 export PROJECT_NUMBER=$(gcloud projects describe ${GOOGLE_CLOUD_PROJECT} --format="value(projectNumber)")
 
-# 0) 필요 GCP API 활성화
+# 2) Service Account 설정
+export SA_NAME="ambient-agent-sa"
+export SA_EMAIL="${SA_NAME}@${GOOGLE_CLOUD_PROJECT}.iam.gserviceaccount.com"
+# 3) 필요 GCP API 활성화
 gcloud services enable \
     aiplatform.googleapis.com \
     run.googleapis.com \
@@ -49,6 +49,7 @@ gcloud services enable \
     storage.googleapis.com \
     iam.googleapis.com \
     --project=${GOOGLE_CLOUD_PROJECT}
+```
 
 # 1) 서비스 계정 생성
 gcloud iam service-accounts create ${SA_NAME} \
