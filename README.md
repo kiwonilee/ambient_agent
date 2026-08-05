@@ -4,6 +4,42 @@ Google Cloud Monitoring의 **Vertex AI Endpoint `response_count`** 메트릭 Ale
 
 ---
 
+## 🏗️ 시스템 아키텍처 및 이벤트 흐름
+
+```
+[ Vertex AI Endpoint ]
+        │
+        ▼ (aiplatform.googleapis.com/endpoint/response_count)
+[ Cloud Monitoring Alerting Policy ]
+        │
+        ▼ (Alert Triggered -> Incident 생성)
+[ Notification Channel (Pub/Sub Topic: vertex-endpoint-alerts) ]
+        │
+        ▼ (Pub/Sub Push Subscription: vertex-alert-agent-sub)
+[ ADK Ambient Agent (/apps/ambient_agent/trigger/pubsub) ]
+```
+
+1. **Vertex AI Endpoint**: 트래픽 증가로 인해 `response_count` 메트릭 임계값 초과.
+2. **Cloud Monitoring Alerting Policy**: 설정된 임계값을 모니터링하다가 조건 충족 시 Alert 인시던트 생성.
+3. **Notification Channel**: Alert 메시지를 Pub/Sub Topic으로 발행.
+4. **Pub/Sub Push Subscription**: Pub/Sub 메시지를 감지하여 Ambient Agent의 `/apps/ambient_agent/trigger/pubsub` 엔드포인트로 HTTP POST 요청 전송.
+5. **Ambient Agent Workflow**: 수신한 Pub/Sub 메시지를 ADK **Graph-based Workflow (`Workflow`)**를 통해 파싱, LLM 인시던트 분석, 서포트 케이스 등록, Slack 알림 전송 파이프라인으로 순차 처리.
+
+---
+
+## 🚀 프로젝트 구조
+
+```
+ambient_agent/
+├── agent.py               # Graph-based Workflow, parse_event, LlmAgent, create_support_case, send_slack_notification 구현
+├── tests/
+│   └── test_agent.py      # Workflow 파이프라인 단위 테스트 및 Pub/Sub Push Trigger 통합 테스트
+├── pyproject.toml         # Python 패키지 및 의존성 설정
+├── requirements.txt       # 의존성 패키지 목록
+└── README.md              # 프로젝트 가이드 문서
+```
+
+---
 
 ## 🤖 `agent.py` Graph-based Agent Workflow 구조
 
@@ -26,17 +62,38 @@ ADK **`Workflow`** 기반의 [agent.py](file:///home/user/workspace/ambient_agen
 
 ---
 
+## 🛠️ GCP 설정 및 연동 가이드 (의존성 순서)
+
+이벤트를 안전하게 수신하고 처리하기 위한 GCP 자원 생성 및 보안 권한 설정 가이드입니다.
+
+```
+[ 1. Service Account 생성 & IAM 권한 부여 ] ➔ SA_EMAIL 획득
+          │
+          ▼
+[ 2. ADK Cloud Run 에이전트 배포 ] ➔ Service URL 획득
+          │
+          ▼
+[ 3. Pub/Sub Topic & Push Subscription 생성 ] ➔ --push-endpoint 연결
+          │
+          ▼
+[ 4. Notification Channel 생성 ] ➔ NOTIFICATION_CHANNEL_ID 획득
+          │
+          ▼
+[ 5. Alerting Policy 생성 및 등록 ] ➔ Notification Channel 연결
+```
+
 ### 1단계: Service Account 생성 및 IAM 권한 부여
 에이전트 런타임 및 Pub/Sub Push 인증에 사용할 Service Account를 생성하고 필요한 역할을 부여합니다.
 
 ```bash
-# 1) GCP Project ID 및 Project Number 설정
+# 1) GCP Project ID 및 Project Number 설정 (현재 활성 프로젝트 자동 참조)
 export GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project)}"
 export PROJECT_NUMBER=$(gcloud projects describe ${GOOGLE_CLOUD_PROJECT} --format="value(projectNumber)")
 
 # 2) Service Account 설정
 export SA_NAME="ambient-agent-sa"
 export SA_EMAIL="${SA_NAME}@${GOOGLE_CLOUD_PROJECT}.iam.gserviceaccount.com"
+
 # 3) 필요 GCP API 활성화
 gcloud services enable \
     aiplatform.googleapis.com \
@@ -49,14 +106,13 @@ gcloud services enable \
     storage.googleapis.com \
     iam.googleapis.com \
     --project=${GOOGLE_CLOUD_PROJECT}
-```
 
-# 1) 서비스 계정 생성
+# 4) 서비스 계정 생성
 gcloud iam service-accounts create ${SA_NAME} \
   --display-name="Ambient Agent Runtime Service Account" \
   --project=${GOOGLE_CLOUD_PROJECT}
 
-# 2) 에이전트 실행에 필요한 IAM 역할 부여
+# 5) 에이전트 실행에 필요한 IAM 역할 부여
 ROLES=(
     "roles/aiplatform.user"         # Vertex AI Gemini 모델 사용 권한
     "roles/logging.logWriter"       # Cloud Logging 런타임 로그 기록 권한
@@ -69,7 +125,7 @@ for ROLE in "${ROLES[@]}"; do
         --role="${ROLE}"
 done
 
-# 3) Pub/Sub 서비스 계정 생성 및 Push 권한 설정
+# 6) Pub/Sub 서비스 계정 생성 및 Push 권한 설정
 gcloud beta services identity create --service=pubsub.googleapis.com --project=${GOOGLE_CLOUD_PROJECT}
 
 PUBSUB_SA="service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com"
@@ -94,9 +150,9 @@ adk deploy cloud_run \
   --trigger_sources="pubsub" \
   --artifact_service_uri="gs://${GOOGLE_CLOUD_PROJECT}-bucket" \
   /home/user/workspace/ambient_agent \
-  -- --allow-unauthenticated --set-env-vars="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT},GOOGLE_CLOUD_LOCATION=global,LOCATION=global"
-```
-```bash
+  -- --allow-unauthenticated --set-env-vars="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT},GOOGLE_CLOUD_LOCATION=global,LOCATION=global,GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_GENAI_USE_ENTERPRISE=TRUE"
+
+# 배포 완료 후 Cloud Run URL 저장
 export CLOUD_RUN_URL="https://ambient-agent-service-${PROJECT_NUMBER}.us-central1.run.app"
 ```
 
@@ -136,9 +192,9 @@ gcloud alpha monitoring channels create \
   --display-name="Vertex Endpoint Alerts PubSub Channel" \
   --type="pubsub" \
   --channel-labels=topic=projects/${GOOGLE_CLOUD_PROJECT}/topics/vertex-endpoint-alerts
-```
-```
-NOTIFICATION_CHANNEL_ID=15260977979104931430
+
+# 출력 결과의 name 항목에서 notificationChannels/12345678 형태의 CHANNEL ID를 확인 후 설정합니다.
+export NOTIFICATION_CHANNEL_ID="YOUR_NOTIFICATION_CHANNEL_ID"
 ```
 
 ---
